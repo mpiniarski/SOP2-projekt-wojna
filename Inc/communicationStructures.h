@@ -5,7 +5,7 @@ const key_t shmKey = 111;
 const key_t semKey = 111;
 
 const enum TYPE {TYPE_DATA=1, TYPE_BUILD, TYPE_ATTACK, TYPE_ALIVE};
-const enum entityType {LIGHT=0, HEAVY, CAVALRY, WORKER};
+const enum ENITY_TYPE {LIGHT=0, HEAVY, CAVALRY, WORKER};
 
 typedef struct Init {
     long mtype;

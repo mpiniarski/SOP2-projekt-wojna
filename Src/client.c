@@ -7,39 +7,37 @@
 #include <errno.h>
 #include <time.h>
 #include <stdlib.h>
+#include <math.h>
 
+#include <sys/shm.h>
 
 #include <sys/select.h>
 #include <termios.h>
 
 #include "communicationStructures.h"
+#include "kbhit.h"
+
 
 int connectToServerAndGetCommunicationKey();
 void sendBuildMsg(int type, int amount);
+void printData(Data dataMsg);
 
 int msgKey;
 
-int getch()
-{
-    struct termios old;
-    struct termios tmp;
-    int ch;
-    if (tcgetattr(STDIN_FILENO, &old)) return -1;
-    memcpy(&tmp, &old, sizeof(old));
-    tmp.c_lflag &= ~ICANON & ~ECHO;
-    if (tcsetattr(STDIN_FILENO, TCSANOW, (const struct termios*) &tmp)) return -1;
-    ch = getchar();
-    tcsetattr(STDIN_FILENO, TCSANOW, (const struct termios*) &old);
-    return ch;
-}
-
 enum mode{MODE_VIEW,MODE_BUILD,MODE_ATTACK};
-int mode;
+//int *mode;
 
 int main() {
-//    cannonicalOff();
     char stopGame = 0;
-    mode = MODE_VIEW;
+    int mode;
+//    int shmId = shmget(getppid(), sizeof(int), IPC_CREAT|0640);
+//    if (shmId == -1){
+//        perror("Shared memory creating");
+//        exit(0);
+//    }
+//    mode = (int*)shmat(shmId, NULL, 0);
+//
+//    *mode = MODE_VIEW;
 
     int communicationKey = connectToServerAndGetCommunicationKey();
     msgKey = msgget(communicationKey, 0640);
@@ -48,61 +46,82 @@ int main() {
         exit(0);
     }
 
-    if (fork() == 0){
-        while (stopGame == 0){
-            if (mode == MODE_VIEW){
-                int ch;
-                if ( (ch = getch()) ){
-                    if ((char)ch >= 'a' && (char)ch <= 'z'){
-                        if( (char)ch == 'b'){
-                            mode=MODE_BUILD;
-                        }
-                    }
-                }
-            }
-        }
-        exit(0);
-    }
-
     while (stopGame == 0){
         Data dataMsg;
-        int error;
-        char type;
-        int amount;
+//        int error;
+        char type = 0;
+        int amount = 0;
+        
+
+        if (  kbhit() ){
+            char ch = getchar();
+                if ((char)ch >= 'a' && (char)ch <= 'z'){
+                    if( (char)ch == 'b'){
+                        mode = MODE_BUILD;
+                    }
+                }
+        }
+
         switch(mode){
             case MODE_VIEW:
-                error = (int) msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR);
-                if(error == -1){
-                    perror("Receiveing");
-                    exit(0);
-                }
+                msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
 
-                printf("Points : %d\nResources : %d\n\nLight : %d\nHeavy : %d\nCavalry : %d\nWorkers : %d\n\n"
-                        ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers);
-
+                printData(dataMsg);
 
                 if (dataMsg.end != 0) break;
                 break;
             case MODE_BUILD:
-                do{
-                    printf("Enter type: (l)ight, (h)eavy, (c)avalry or (w)orkers\n");
-                    type = getch();
+                while(type != 'l' && type !='h' && type !='c' && type !='w'){
+                    msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+                    printData(dataMsg);
+                    printf("Enter type - (l)ight, (h)eavy, (c)avalry or (w)orkers:\n");
+                    if( kbhit() ){
+                        type = getchar();
+                    }
                 }
-                while(type != 'l' && type !='h' && type !='c' && type !='w');
 
-                do{
-                    printf("Enter amount:\n");
-                    scanf("%d",&amount);
+                while(amount <= 0){
+                    msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+                    printData(dataMsg);
+                    printf("Enter amount (0-9):\n");
+                    if( kbhit() ){
+                        char temp = getchar();
+                        if (temp>='0' && temp <='9')
+                            amount = temp-'0';
+//                        char temp = getchar();
+//                        if(temp == 13 && amount > 0) break;
+//                        if (temp>='1' && temp <='9'){
+//                            amount += (int)temp-'0' * pow(10,count++);
+//                        }
+                    }
                 }
-                while(amount<=0);
 
-                sendBuildMsg(LIGHT,3);
+                switch(type){
+                    case 'l':
+                        sendBuildMsg(LIGHT,amount);
+                        break;
+                    case 'h':
+                        sendBuildMsg(HEAVY,amount);
+                        break;
+                    case 'c':
+                        sendBuildMsg(CAVALRY,amount);
+                        break;
+                    case 'w':
+                         sendBuildMsg(WORKER,amount);
+                        break;
+                }
+                mode = MODE_VIEW;
                 break;
         }
-
     }
-    
     return 0;
+}
+
+void printData(Data dataMsg){
+    printf("\033c");
+    usleep(100*1000); // to prevent lagging screen
+    printf("Points : %d\nResources : %d\n\nLight : %d\nHeavy : %d\nCavalry : %d\nWorkers : %d\n\n"
+            ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers);
 }
 
 int connectToServerAndGetCommunicationKey(){
@@ -175,4 +194,5 @@ void sendBuildMsg(int type, int amount){
         perror("Sending");
         exit(0);
     }
+    return;
 }
