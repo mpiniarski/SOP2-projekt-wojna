@@ -1,6 +1,6 @@
 #pragma once
 
-const key_t connectionKey = 15071410;
+const key_t connectionKey = 15071417;
 const key_t shmKey = 111;
 const key_t semKey = 111;
 
@@ -20,7 +20,7 @@ typedef struct Data {
     int workers;
     int points;
     int resources;
-    char* info;
+    char info[120];
     char end;
 }Data;
 
@@ -51,6 +51,7 @@ typedef struct PlayerData{
     int workers;
     int points;
     int resources;
+    //char info[120];
 } PlayerData;
 
 typedef struct GameData{
