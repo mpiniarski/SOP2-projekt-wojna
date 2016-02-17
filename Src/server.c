@@ -10,17 +10,18 @@
 
 #include <sys/shm.h>
 #include <sys/sem.h>
+#include <signal.h>
 
 #include "communicationStructures.h"
 #include "my_semafors.h"
 
 void initGameData();
 void connectToClinets();
-void checkClients();
 void sendDataMsgToClient(int playerNumber, int endGame);
 void handleBuildOrders(int playerNumber);
 void handleAttackOrders(int playerNumber);
 void updateResources();
+void winGame(int playerNumber);
 
 GameData* gameData;
 int semId;
@@ -47,50 +48,86 @@ int main() {
     gameData = (GameData*)shmat(shmId, NULL, 0);
     initGameData();
 
+    connectToClinets();
+
+    // UPDATE RESOURCES
     if ( fork() == 0){
-        int stopGame;
-        int stopServer;
-        do{
-            P(semId,SEM_SERVER_DATA);
-            stopGame = gameData->stopGame;
-            stopServer = gameData->stopServer;
-            V(semId,SEM_SERVER_DATA);
-            if (stopGame == 0){
+        P(semId,SEM_SERVER_DATA);
+        while(gameData->stopServer == 0){
+            if (gameData->stopGame == 0){
+                V(semId,SEM_SERVER_DATA);
                 sleep(1);
-                printf("UpdateRes\n");
+                //printf("UpdateRes\n");
                 updateResources();
             }
-        } while(stopServer == 0);
+            else{
+                V(semId,SEM_SERVER_DATA);
+                sleep(1);
+            }
+            P(semId,SEM_SERVER_DATA);
+        }
+        V(semId,SEM_SERVER_DATA);
         exit(0);
     }
 
-    int stopGame;
-    int stopServer;
-    do{
-        usleep(100*1000);
-        connectToClinets();
+    // HEARTBEAT 
+    if ( fork() == 0){
+        int error;
+        int clientLates[2]={0,0};
+
         P(semId,SEM_SERVER_DATA);
-        stopGame = gameData->stopGame;
-        stopServer = gameData->stopServer;
+        while(gameData->stopServer == 0){
+            if (gameData->stopGame == 0){
+                V(semId,SEM_SERVER_DATA);
+                sleep(2);
+                for(int playerNumber=0; playerNumber<2; playerNumber++){
+                    Alive aliveMsg;
+                    aliveMsg.mtype = TYPE_ALIVE_SERVER;
+                    error = msgsnd(gameData->connectedIDs[playerNumber],&aliveMsg,0,IPC_NOWAIT);
+                    if(error == -1) perror("Sending aliveMsg");
+                    error = msgrcv(gameData->connectedIDs[playerNumber],&aliveMsg,0,TYPE_ALIVE_CLIENT,IPC_NOWAIT);
+                    if(error == -1){
+                        if (++clientLates[playerNumber] == 3){
+                            printf("Client %d is DEAD\n",playerNumber);
+                            winGame( (playerNumber+1)%2 );
+                        }
+                    }
+                }
+            }
+            else{
+                V(semId,SEM_SERVER_DATA);
+                sleep(1);
+            }
+            P(semId,SEM_SERVER_DATA);
+        }
         V(semId,SEM_SERVER_DATA);
-        if (stopGame == 0){
-            printf("HandleAllShit\n");
+        exit(0);
+    }
+
+    // ORDERS MANAGEMENT 
+    P(semId,SEM_SERVER_DATA);
+    while(gameData->stopServer == 0){
+        V(semId,SEM_SERVER_DATA);
+        usleep(100*1000);
+        P(semId,SEM_SERVER_DATA);
+        if (gameData->stopGame == 0){
+            V(semId,SEM_SERVER_DATA);
+            //printf("HandleAllShit\n");
             handleBuildOrders(0);
             handleBuildOrders(1);
             handleAttackOrders(0);
             handleAttackOrders(1);
-        } 
-    } while(stopServer == 0);
-//
-//    if ( fork() > 0){
-////        checkClients();
-//        exit(0);
-//    }
-//
-//
-//    if ( fork() > 0){
-//        exit(0);
-//    }
+        }
+        else{
+            V(semId,SEM_SERVER_DATA);
+            sleep(1);
+        }
+        P(semId,SEM_SERVER_DATA);
+    }
+    V(semId,SEM_SERVER_DATA);
+
+    kill(0,SIGKILL);
+    return 0;
 }
 
 
@@ -108,7 +145,6 @@ void initGameData(){
     P(semId,SEM_SERVER_DATA);
     gameData->stopServer = 0;
     gameData->stopGame = 1;
-    gameData->connected = 0;
     V(semId,SEM_SERVER_DATA);
 }
 void resetPlayer(int playerId){
@@ -120,115 +156,69 @@ void resetPlayer(int playerId){
     gameData->player[playerId].resources=300;
 }
 
-void connectToClinets(){ // TODO semaphores
-//    int msgId = msgget(connectionKey, IPC_CREAT|IPC_EXCL | 0640);
-//    if (msgId == -1){
-//        error = msgctl(connectionKey,IPC_RMID,0); // remove just in case
-//        if(error == -1){
-//            perror("Remove queue");
-//        }
-//        msgId = msgget(connectionKey, IPC_CREAT|IPC_EXCL | 0640);
-//        if (msgId == -1){
-//            perror("Opening main message queue");
-//            exit(0);
-//        }
-//    }
-    int msgId = msgget(connectionKey, IPC_CREAT | 0640);
-    if (msgId == -1){
+int msggetSave(key_t key){
+    int msgId = msgget(key, IPC_CREAT | 0640);
+    if(msgId == -1){
         perror("Opening message queue");
         exit(0);
     }
+    int error = msgctl(msgId,IPC_RMID,0); // remove to clean just in case
+    if(error == -1){
+        perror("Remove queue");
+        exit(0);
+    }
+    msgId = msgget(key, IPC_CREAT | 0640);
+    if(msgId == -1){
+        perror("Opening message queue");
+        exit(0);
+    }
+    return msgId;
+}
 
-    int error;
+void connectToClinets(){
+    int msgId = msggetSave(connectionKey);
+    printf("%d\n",msgId);
+
     Init initMsg;
-    while(gameData->stopServer == 0){
-        error = (int) msgrcv(msgId, &initMsg, sizeof(initMsg.nextMsg), 1, MSG_NOERROR|IPC_NOWAIT);
-        if(error == -1){
-            return;
-        }
-        else{
-            key_t key;
-            if (gameData->connected<2){
-                key = getpid()+gameData->connected; // generate uniqe key
+    for (int playerNumber=0; playerNumber<2; playerNumber++){
+        key_t key = getpid()+ playerNumber; // generate uniqe key
 
-                gameData->connectedIDs[gameData->connected] = msgget(key, IPC_CREAT|IPC_EXCL | 0640); // save msgget
-                if (gameData->connectedIDs[gameData->connected] == -1){
-                    error = msgctl(key,IPC_RMID,0); // remove just in case
-                    if(error == -1){
-                        perror("Remove queue");
-                    }
-                    gameData->connectedIDs[gameData->connected] = msgget(key, IPC_CREAT|IPC_EXCL | 0640);
-                    if (gameData->connectedIDs[gameData->connected] == -1){
-                        perror("Opening message queue with client");
-                        exit(0);
-                    }
-                }
+        int queueId = msggetSave(key);
+        P(semId,playerNumber+2);
+        gameData->connectedIDs[playerNumber] = queueId;
+        V(semId,playerNumber+2);
 
-                (gameData->connected)++;
-                if(gameData->connected == 2){
-                    gameData->stopGame = 0;
-                    sendDataMsgToClient(0,0);
-                    sendDataMsgToClient(1,0);
-                }
-
-
-                initMsg.mtype=2;
-                initMsg.nextMsg=key;
-
-                error = msgsnd(msgId,&initMsg,sizeof(initMsg.nextMsg),0);
-                if(error == -1){
-                    perror("Sending");
-                    exit(0);
-                }
-            }
-            else{
-                key = 0;
-            }
-
-            printf("%d : %d\n",gameData->connected, key);
-            return;
-        }
-    }
-}
-
-void checkClients(){
-    int error;
-    while(gameData->stopServer == 0){
-        Alive aliveMsg;
-        aliveMsg.mtype = 4;
-        aliveMsg.lol='s';
-        error = (int) msgsnd(gameData->connectedIDs[0], &aliveMsg, sizeof(aliveMsg)-sizeof(aliveMsg.mtype),0);
+        initMsg.mtype=1;
+        initMsg.nextMsg=key;
+        int error = msgsnd(msgId,&initMsg,sizeof(initMsg.nextMsg),0);
         if(error == -1){
             perror("Sending");
             exit(0);
         }
-        error = (int) msgsnd(gameData->connectedIDs[1], &aliveMsg, sizeof(aliveMsg)-sizeof(aliveMsg.mtype),0);
-        if(error == -1){
-            perror("Sending");
-            exit(0);
-        }
-
-        sleep(3);
-
-        error = (int) msgrcv(gameData->connectedIDs[0], &aliveMsg, sizeof(aliveMsg)-sizeof(aliveMsg.mtype),TYPE_ALIVE,IPC_NOWAIT);
-        if(error == -1){
-            perror("Receiveing");
-            exit(0);
-        }
-        if (aliveMsg.lol == 's'){
-            gameData->stopGame = 1;
-        }
-
-        error = (int) msgrcv(gameData->connectedIDs[1], &aliveMsg, sizeof(aliveMsg)-sizeof(aliveMsg.mtype),TYPE_ALIVE,IPC_NOWAIT);
-        if(error == -1){
-            perror("Receiveing");
-            exit(0);
-        }
-        if (aliveMsg.lol == 's'){
-            gameData->stopGame = 1;
-        }
+        printf("Sending %d\n",key);
     }
+    int connected = 0;
+    while(connected < 2){
+        printf("Receiveing %d\n",connected+1);
+        int error = msgrcv(msgId,&initMsg,sizeof(initMsg.nextMsg),2,0);
+        if(error == -1){
+            perror("Receiving");
+            exit(0);
+        }
+        connected ++;
+        printf("Connection %d\n",connected);
+    }
+    msgctl(connectionKey,IPC_RMID,0); // remove just in case
+    //Start game
+    P(semId,SEM_SERVER_DATA);
+    gameData->stopGame = 0;
+    V(semId,SEM_SERVER_DATA);
+    sendDataMsgToClient(0,0);
+    sendDataMsgToClient(1,0);
+    printf("GAME STARTED\n");
+    return;
 }
+
 
 void updateResources(){
     P(semId,SEM_DATA1);
@@ -265,6 +255,7 @@ void winGame(int playerNumber){
     sendDataMsgToClient(0,1);
     sendDataMsgToClient(1,1);
     initGameData();
+    connectToClinets();
 }
 
 void attackHandle(int attackingPlayerNumber, int lightAmount, int heavyAmount,int cavalryAmount){
@@ -308,23 +299,22 @@ void attackHandle(int attackingPlayerNumber, int lightAmount, int heavyAmount,in
         cavalryAmount -= cavalryAmount * (float)defendingAttackPower/attackingDefendPower;
         //printf("%d,%d,%d\n",lightAmount,heavyAmount,cavalryAmount);
     }
-        gameData->player[defendingPlayerNumber].light = defendingLightAmount;
-        gameData->player[defendingPlayerNumber].heavy = defendingHeavyAmount;
-        gameData->player[defendingPlayerNumber].cavalry = defendingCavalryAmount;
-        V(semId,defendingPlayerNumber+2);
+    gameData->player[defendingPlayerNumber].light = defendingLightAmount;
+    gameData->player[defendingPlayerNumber].heavy = defendingHeavyAmount;
+    gameData->player[defendingPlayerNumber].cavalry = defendingCavalryAmount;
+    V(semId,defendingPlayerNumber+2);
 
-        P(semId,attackingAttackPower+2);
-        gameData->player[attackingPlayerNumber].light += lightAmount;
-        gameData->player[attackingPlayerNumber].heavy += heavyAmount;
-        gameData->player[attackingPlayerNumber].cavalry += cavalryAmount;
-        gameData->player[attackingPlayerNumber].points += point;
-        if( gameData->player[attackingPlayerNumber].points == 5){
-            V(semId,attackingAttackPower+2);
-            winGame(attackingPlayerNumber);
-        }
-        else
-            V(semId,attackingAttackPower+2);
-    
+    P(semId,attackingPlayerNumber+2);
+    gameData->player[attackingPlayerNumber].light += lightAmount;
+    gameData->player[attackingPlayerNumber].heavy += heavyAmount;
+    gameData->player[attackingPlayerNumber].cavalry += cavalryAmount;
+    gameData->player[attackingPlayerNumber].points += point;
+    if( gameData->player[attackingPlayerNumber].points == 1){
+        V(semId,attackingPlayerNumber+2);
+        winGame(attackingPlayerNumber);
+    }
+    else
+        V(semId,attackingPlayerNumber+2);
 }
 
 
@@ -334,7 +324,6 @@ void handleAttackOrders(int playerNumber){
         P(semId,playerNumber+2);
         int queueId = gameData->connectedIDs[playerNumber];
         V(semId,playerNumber+2);
-
         int error = (int) msgrcv(queueId, &attackMsg, sizeof(attackMsg)-sizeof(attackMsg.mtype),TYPE_ATTACK, IPC_NOWAIT);
         if(error != -1){
             P(semId,playerNumber+2);
@@ -349,7 +338,7 @@ void handleAttackOrders(int playerNumber){
                 gameData->player[playerNumber].heavy -= attackMsg.heavy;
                 gameData->player[playerNumber].cavalry -= attackMsg.cavalry;
                 V(semId,playerNumber+2);
-                if (fork() != 0){
+                if (fork() == 0){
                     attackHandle(playerNumber,attackMsg.light,attackMsg.heavy,attackMsg.cavalry);
                     exit(0);
                 }

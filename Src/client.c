@@ -11,8 +11,8 @@
 
 #include <sys/shm.h>
 
-#include <sys/select.h>
-#include <termios.h>
+#include <signal.h>
+
 
 #include "communicationStructures.h"
 #include "kbhit.h"
@@ -26,26 +26,24 @@ void sendBuildMsg(int type, int amount);
 void printData(Data dataMsg);
 void handleEvents();
 
-int msgKey;
-Data dataMsg;
-int mode;
-char stopGame;
+char* stopGame;
 
+Data dataMsg;
+int msgKey;
+int mode;
 enum mode{MODE_VIEW,MODE_BUILD,MODE_ATTACK};
-//int *mode;
+
 
 int main() {
-    stopGame = 0;
     mode = MODE_VIEW;
 
-//    int shmId = shmget(getppid(), sizeof(int), IPC_CREAT|0640);
-//    if (shmId == -1){
-//        perror("Shared memory creating");
-//        exit(0);
-//    }
-//    mode = (int*)shmat(shmId, NULL, 0);
-//
-//    *mode = MODE_VIEW;
+    int shmId = shmget(getppid(), sizeof(char), IPC_CREAT|0640);
+    if (shmId == -1){
+        perror("Shared memory creating");
+        exit(0);
+    }
+    stopGame = (char*)shmat(shmId, NULL, 0);
+    *stopGame = 0;
 
     int communicationKey = connectToServerAndGetCommunicationKey();
     msgKey = msgget(communicationKey, 0640);
@@ -54,9 +52,40 @@ int main() {
         exit(0);
     }
 
-    while (stopGame == 0){
-        handleEvents();
+    //Waiting for game to start
+    int error = msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR);
+    if(error == -1){
+        perror("Waiting for game to start");
+        exit(0);
+    }
 
+    printData(dataMsg);
+
+    // HEARTBEAT 
+    if ( fork() == 0){
+        int error;
+        int serverLates = 0;
+
+        while(1){
+            sleep(2);
+            Alive aliveMsg;
+            aliveMsg.mtype = TYPE_ALIVE_CLIENT;
+            error = msgsnd(msgKey,&aliveMsg,0,IPC_NOWAIT);
+            if(error == -1) perror("Sending aliveMsg");
+            error = msgrcv(msgKey,&aliveMsg,0,TYPE_ALIVE_SERVER,IPC_NOWAIT);
+            if(error == -1){
+                if (++serverLates == 3){
+                    printf("Server is DEAD\n");
+                    *stopGame = 1;
+                    break;
+                }
+            }
+        }
+        exit(0);
+    }
+
+    while (*stopGame == 0){
+        handleEvents();
         switch(mode){
             case MODE_VIEW:
                 msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
@@ -71,42 +100,35 @@ int main() {
                 mode = MODE_VIEW;
                 break;
         }
-        if (dataMsg.end != 0) stopGame = 1;
+        if (dataMsg.end != 0) *stopGame = 1;
     }
+    kill(0,SIGKILL);
     return 0;
 }
 
 int connectToServerAndGetCommunicationKey(){
     int error;
-
-    int msgid = msgget(connectionKey,IPC_CREAT | 0640);
+    int msgid = msgget(connectionKey, 0640);
     if (msgid == -1){
-        perror("Opening message queue");
+        printf("No server available. Try again later...\n");
         exit(0);
     }
 
     Init initMsg;
-    initMsg.mtype=1;
-    initMsg.nextMsg=-1;
-
+    error = (int) msgrcv(msgid, &initMsg, sizeof(initMsg.nextMsg), 1, IPC_NOWAIT);
+    if(error == -1){
+        printf("No server available. Try again later...\n");
+        exit(0);
+    }
+    int connectionKey = initMsg.nextMsg;
+    initMsg.mtype=2;
     error = msgsnd(msgid,&initMsg,sizeof(initMsg.nextMsg),0);
     if(error == -1){
         perror("Sending");
         exit(0);
     }
 
-    error = (int) msgrcv(msgid, &initMsg, sizeof(initMsg.nextMsg), 2, 0);
-    if(error == -1){
-        perror("Receiveing");
-        exit(0);
-    }
-
-    if(initMsg.nextMsg == 0){
-        printf("Server is busy. Try again later.\n");
-        exit(0);
-    }
-
-    return initMsg.nextMsg;
+    return connectionKey;
 }
 
 void printData(Data dataMsg){
@@ -127,7 +149,7 @@ void handleEvents(){
                     mode = MODE_ATTACK;
                 }
                 else if( (char)ch == 'q'){
-                    stopGame = 1;
+                    *stopGame = 1;
                 }
             }
     }

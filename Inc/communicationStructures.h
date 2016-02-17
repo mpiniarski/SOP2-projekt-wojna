@@ -1,10 +1,10 @@
 #pragma once
 
-const key_t connectionKey = 15071417;
+const key_t connectionKey = 15071410;
 const key_t shmKey = 111;
 const key_t semKey = 111;
 
-const enum TYPE {TYPE_DATA=1, TYPE_BUILD, TYPE_ATTACK, TYPE_ALIVE};
+const enum TYPE {TYPE_DATA=1, TYPE_BUILD, TYPE_ATTACK, TYPE_ALIVE_SERVER, TYPE_ALIVE_CLIENT};
 const enum ENITY_TYPE {LIGHT=0, HEAVY, CAVALRY, WORKER};
 
 typedef struct Init {
@@ -40,8 +40,7 @@ typedef struct Attack {
 }Attack;
 
 typedef struct Alive {
-    long mtype; //4
-    char lol;
+    long mtype; //4 or 5
 }Alive;
 
 typedef struct PlayerData{
@@ -56,7 +55,6 @@ typedef struct PlayerData{
 
 typedef struct GameData{
     PlayerData player[2];
-    int connected;
     int connectedIDs[2];
     char stopServer;
     char stopGame;
