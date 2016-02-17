@@ -50,7 +50,7 @@ typedef struct PlayerData{
     int workers;
     int points;
     int resources;
-    //char info[120];
+    char info[120];
 } PlayerData;
 
 typedef struct GameData{
@@ -60,4 +60,3 @@ typedef struct GameData{
     char stopGame;
 } GameData;
 
-int shmSize = sizeof(GameData);

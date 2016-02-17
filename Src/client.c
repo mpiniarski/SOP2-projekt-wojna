@@ -7,7 +7,6 @@
 #include <errno.h>
 #include <time.h>
 #include <stdlib.h>
-#include <math.h>
 
 #include <sys/shm.h>
 
@@ -33,14 +32,26 @@ int msgKey;
 int mode;
 enum mode{MODE_VIEW,MODE_BUILD,MODE_ATTACK};
 
+void exitSave(int val){
+    kill(0,SIGKILL);
+    exit(val);
+}
+
+void handleSignal(){
+    exitSave(0);
+}
 
 int main() {
+    printf("\033c");
+    signal(SIGINT,handleSignal);
+    signal(SIGQUIT,handleSignal);
+    signal(SIGTERM,handleSignal);
     mode = MODE_VIEW;
 
     int shmId = shmget(getppid(), sizeof(char), IPC_CREAT|0640);
     if (shmId == -1){
         perror("Shared memory creating");
-        exit(0);
+        exitSave(0);
     }
     stopGame = (char*)shmat(shmId, NULL, 0);
     *stopGame = 0;
@@ -49,16 +60,15 @@ int main() {
     msgKey = msgget(communicationKey, 0640);
     if (msgKey == -1) {
         perror("Opening message queue");
-        exit(0);
+        exitSave(0);
     }
 
     //Waiting for game to start
     int error = msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR);
     if(error == -1){
-        perror("Waiting for game to start");
-        exit(0);
+        printf("Server process is dead. Game is over.\n");
+        exitSave(0);
     }
-
     printData(dataMsg);
 
     // HEARTBEAT 
@@ -75,13 +85,13 @@ int main() {
             error = msgrcv(msgKey,&aliveMsg,0,TYPE_ALIVE_SERVER,IPC_NOWAIT);
             if(error == -1){
                 if (++serverLates == 3){
-                    printf("Server is DEAD\n");
+                    printf("Server process is dead. Game is over.\n");
                     *stopGame = 1;
                     break;
                 }
             }
         }
-        exit(0);
+        exitSave(0);
     }
 
     while (*stopGame == 0){
@@ -100,10 +110,12 @@ int main() {
                 mode = MODE_VIEW;
                 break;
         }
-        if (dataMsg.end != 0) *stopGame = 1;
+        if (dataMsg.end != 0) {
+            msgctl(msgKey,IPC_RMID,0); // to keep system clear
+            *stopGame = 1;
+        }
     }
-    kill(0,SIGKILL);
-    return 0;
+    exitSave(0);
 }
 
 int connectToServerAndGetCommunicationKey(){
@@ -111,21 +123,21 @@ int connectToServerAndGetCommunicationKey(){
     int msgid = msgget(connectionKey, 0640);
     if (msgid == -1){
         printf("No server available. Try again later...\n");
-        exit(0);
+        exitSave(0);
     }
 
     Init initMsg;
     error = (int) msgrcv(msgid, &initMsg, sizeof(initMsg.nextMsg), 1, IPC_NOWAIT);
     if(error == -1){
         printf("No server available. Try again later...\n");
-        exit(0);
+        exitSave(0);
     }
     int connectionKey = initMsg.nextMsg;
     initMsg.mtype=2;
     error = msgsnd(msgid,&initMsg,sizeof(initMsg.nextMsg),0);
     if(error == -1){
         perror("Sending");
-        exit(0);
+        exitSave(0);
     }
 
     return connectionKey;
@@ -133,9 +145,9 @@ int connectToServerAndGetCommunicationKey(){
 
 void printData(Data dataMsg){
     printf("\033c");
-    usleep(100*1000); // to prevent lagging screen
-    printf("Points : %d\nResources : %d\n\nLight : %d\nHeavy : %d\nCavalry : %d\nWorkers : %d\n\n"
-            ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers);
+    usleep(150*1000); // to prevent lagging screen
+    printf("   Your kingdom:\n\n    Points : %d\n    Resources : %d\n\n    Lightweight warriors : %d\n    Heavyweight warriors : %d\n    Cavalry : %d\n    Workers : %d\n\n   %s\n"
+            ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers, dataMsg.info);
 }
 
 void handleEvents(){
@@ -234,7 +246,7 @@ void sendBuildMsg(int type, int amount){
     int error = (int) msgsnd(msgKey, &buildMsg, sizeof(buildMsg)- sizeof(buildMsg.mtype), IPC_NOWAIT);
     if(error == -1){
         perror("Sending");
-        exit(0);
+        exitSave(0);
     }
     return;
 }
@@ -248,7 +260,7 @@ void sendAttackMsg(int lightAmount, int heavyAmount, int cavalryAmount){
     int error = (int) msgsnd(msgKey, &attackMsg, sizeof(attackMsg)- sizeof(attackMsg.mtype), IPC_NOWAIT);
     if(error == -1){
         perror("Sending");
-        exit(0);
+        exitSave(0);
     }
     return;
 }
