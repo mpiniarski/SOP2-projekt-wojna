@@ -1,0 +1,72 @@
+Protokół
+
+Połączenie z serwerem:
+Na początku każdej gry serwer czyści kolejkę o kluczu 15071410, a następnie wysyła przez nią dwa komunikaty typu 1 zawierające klucz kolejki do komunikacji z klientem (każdy z komunikatów zawiera inny klucz). Po tym czeka na dwie wiadomości zwrotne od klientów, którzy odebrali komunikat. 
+Każdy klient sprawdza (z flagą IPC_NOWAIT) czy w kolejce o kluczu 15071410 znajduje się jakiś komunikat od serwera. Jeśli tak to klient odsyła wiadomość zwrotną (typu 2) przez kolejkę o kluczu 15071410. Jeśli w kolejce nie ma żadnych komunikatów od serwera, oznacza to że serwer klient nie może połączyć się z serwerem. Dalsza komunikacja klient-serwer odbywa się na kolejce z odebranym kluczem.
+
+Struktury wykorzystywane do komunikacji:
+struct Data {
+    long mtype; // =1;
+    int light;
+    int heavy;
+    int cavalry;
+    int workers;
+    int points;
+    int resources;
+    char info[120];
+    char end; //jak ktoś zwycięży to różne od 0
+}
+
+struct Build {
+    long mtype; // =2;
+int light;
+    int heavy;
+    int cavalry;
+    int workers;
+}
+
+struct Attack {
+    long mtype; // =3;
+int light;
+    int heavy;
+    int cavalry;
+}
+
+struct Alive {
+    long mtype; // =4; (albo 5)
+}
+
+
+Czy gra już się rozpoczęła?
+Gra się rozpoczyna, jak serwer wyśle Ci pierwszy obiekt Data
+
+Czy serwer/klient dalej żyje?
+Działanie klienta:
+co 2 sekundy wysyła do serwera komunikat “żyję” typu 4.
+co 2 sekundy sprawdza czy jest komunikat “żyję” od serwera (typu 5). Robi to z flagą IPC_NOWAIT. Jeśli 3 razy pod rząd nie będzie tam komuniakt (czyli jeśli 3 razy msgrcv da błąd) - to znaczy że serwer nie żyje
+
+Działanie serwera:
+co 2 sekundy wysyła do serwera komunikat “żyję” typu 5.
+co 2 sekundy sprawdza czy jest komunikat “żyję” od serwera typu 4. Robi to z flagą IPC_NOWAIT. Jeśli 3 razy pod rząd nie będzie tam komuniaktu (czyli jeśli 3 razy msgrcv da błąd) - to znaczy że klient nie żyje
+
+
+Struktura pamięci współdzielonej:
+
+typedef struct PlayerData{
+    int light;
+    int heavy;
+    int cavalry;
+    int workers;
+    int points;
+    int resources;
+    char info[120];
+} PlayerData;
+
+typedef struct GameData{
+    PlayerData player[2];
+    int connectedIDs[2];
+    char stopServer;
+    char stopGame;
+} GameData;
+
+

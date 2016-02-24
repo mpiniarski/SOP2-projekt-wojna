@@ -6,7 +6,7 @@ INC_PATH = ./Inc/
 SRC_PATH = ./Src/
 
 #Set up flags:
-CFLAGS  = -c -Wall -g -lm
+CFLAGS  = -c -Wall -g
 LFLAGS = -Wall -g
 
 #Set up included header files
@@ -16,8 +16,8 @@ INCLUDES = -I$(INC_PATH)
 CSOURCES=$(shell (find -L $(SRC_PATH) -name '*.c' | sed -e 's!^./Src!./Res!' -e 's/\.c$$/\.o/' ))
 
 
-SERVER_DEP= Res/server.o Res/my_semafors.o
-CLIENT_DEP= Res/client.o Res/kbhit.o
+SERVER_DEP= Res/server.o Res/my_semafors.o Res/myipc.o
+CLIENT_DEP= Res/client.o Res/kbhit.o Res/myipc.o
 
 
 default: Res/server.out Res/client.out 

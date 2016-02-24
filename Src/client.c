@@ -1,105 +1,72 @@
-#include <sys/types.h>
-#include <sys/ipc.h>
+#include <signal.h>
 #include <sys/msg.h>
+#include <sys/shm.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
-#include <errno.h>
-#include <time.h>
 #include <stdlib.h>
-
-#include <sys/shm.h>
-
-#include <signal.h>
-
 
 #include "communicationStructures.h"
 #include "kbhit.h"
+#include "myipc.h"
 
-
-int connectToServerAndGetCommunicationKey();
-void sendAttackMsg(int lightAmount, int heavyAmount, int cavalryAmount);
-void prepareAndSendBuildMsg();
-void prepareAndSendAttackMsg();
-void sendBuildMsg(int type, int amount);
+void turnCursorOff();
+void clear();
+void overwriteSignals();
+void handleSignal();
+void connectToServer();
 void printData(Data dataMsg);
+void heartbeatPeriodially();
 void handleEvents();
+void prepareAndSendBuildMsg();
+void sendBuildMsg(int type, int amount);
+void prepareAndSendAttackMsg();
+void sendAttackMsg(int lightAmount, int heavyAmount, int cavalryAmount);
 
 char* stopGame;
-
-Data dataMsg;
-int msgKey;
 int mode;
 enum mode{MODE_VIEW,MODE_BUILD,MODE_ATTACK};
+int msgId;
+Data dataMsg;
 
-void exitSave(int val){
-    kill(0,SIGKILL);
-    exit(val);
-}
+char lastMessage[120]; // to be compatibile with others
 
-void handleSignal(){
-    exitSave(0);
-}
-
+// MAIN
 int main() {
-    printf("\033c");
-    signal(SIGINT,handleSignal);
-    signal(SIGQUIT,handleSignal);
-    signal(SIGTERM,handleSignal);
-    mode = MODE_VIEW;
+    //turnCursorOff();
+    clear();
+    overwriteSignals();
 
-    int shmId = shmget(getppid(), sizeof(char), IPC_CREAT|0640);
-    if (shmId == -1){
-        perror("Shared memory creating");
-        exitSave(0);
-    }
+    int shmId = shmgetSave(getppid(), sizeof(char));
     stopGame = (char*)shmat(shmId, NULL, 0);
     *stopGame = 0;
-
-    int communicationKey = connectToServerAndGetCommunicationKey();
-    msgKey = msgget(communicationKey, 0640);
-    if (msgKey == -1) {
-        perror("Opening message queue");
-        exitSave(0);
-    }
+    mode = MODE_VIEW;
+    connectToServer();
 
     //Waiting for game to start
-    int error = msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR);
-    if(error == -1){
-        printf("Server process is dead. Game is over.\n");
-        exitSave(0);
-    }
+    int error = msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR);
+    if(error == -1){ printf("Server process is dead. Game is over.\n"); exitSave(0); }
     printData(dataMsg);
 
     // HEARTBEAT 
-    if ( fork() == 0){
-        int error;
-        int serverLates = 0;
-
-        while(1){
-            sleep(2);
-            Alive aliveMsg;
-            aliveMsg.mtype = TYPE_ALIVE_CLIENT;
-            error = msgsnd(msgKey,&aliveMsg,0,IPC_NOWAIT);
-            if(error == -1) perror("Sending aliveMsg");
-            error = msgrcv(msgKey,&aliveMsg,0,TYPE_ALIVE_SERVER,IPC_NOWAIT);
-            if(error == -1){
-                if (++serverLates == 3){
-                    printf("Server process is dead. Game is over.\n");
-                    *stopGame = 1;
-                    break;
-                }
-            }
-        }
+    int err;
+    if ( (err=fork()) == 0){
+        heartbeatPeriodially();
         exitSave(0);
+    } else if(err == -1){
+        perror("Fork"); exitSave(0);
     }
 
     while (*stopGame == 0){
         handleEvents();
         switch(mode){
             case MODE_VIEW:
-                msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+                msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
                 printData(dataMsg);
+                printf("\n       (1) - Build entities"
+                       "\n       (2) - Attack enemy"
+                       "\n"
+                       "\n       (q) - Quit game (and surrender)\n");
                 break;
             case MODE_BUILD:
                 prepareAndSendBuildMsg();
@@ -111,14 +78,32 @@ int main() {
                 break;
         }
         if (dataMsg.end != 0) {
-            msgctl(msgKey,IPC_RMID,0); // to keep system clear
+            msgctl(msgId,IPC_RMID,0); // to keep system clear
             *stopGame = 1;
         }
     }
     exitSave(0);
 }
 
-int connectToServerAndGetCommunicationKey(){
+void clear(){
+    printf("\033c");
+}
+
+void turnCursorOff(){
+    printf("\e[?25l");
+}
+
+void overwriteSignals(){
+    signal(SIGINT,handleSignal);
+    signal(SIGQUIT,handleSignal);
+    signal(SIGTERM,handleSignal);
+}
+
+void handleSignal(){
+    exitSave(0);
+}
+
+void connectToServer(){
     int error;
     int msgid = msgget(connectionKey, 0640);
     if (msgid == -1){
@@ -140,29 +125,75 @@ int connectToServerAndGetCommunicationKey(){
         exitSave(0);
     }
 
-    return connectionKey;
+    msgId = msgget(connectionKey, 0640);
+    if (msgId == -1) {
+        perror("Opening message queue");
+        exitSave(0);
+    }
 }
 
 void printData(Data dataMsg){
-    printf("\033c");
+    clear();
     usleep(150*1000); // to prevent lagging screen
-    printf("   Your kingdom:\n\n    Points : %d\n    Resources : %d\n\n    Lightweight warriors : %d\n    Heavyweight warriors : %d\n    Cavalry : %d\n    Workers : %d\n\n   %s\n"
-            ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers, dataMsg.info);
+    printf(
+            "                                            \n"
+            "                       ~~~~~~~~~~~~~~       \n"
+            "                        YOUR KINGDOM        \n"
+            "                       ~~~~~~~~~~~~~~       \n"
+            "                                            \n"
+            "                        Points : %d         \n"
+            "                       Resources : %d       \n"
+            "                                            \n"
+            "                 Lightweight warriors : %d  \n"
+            "                 Heavyweight warriors : %d  \n"
+            "                 Cavalry              : %d  \n"
+            "                 Workers              : %d  \n"
+            "                                            \n"
+            "                                            \n"
+            ,dataMsg.points, dataMsg.resources, dataMsg.light, dataMsg.heavy, dataMsg.cavalry, dataMsg.workers);
+
+    // Center info
+    if (strlen(dataMsg.info) != 0)
+        strcpy(lastMessage,dataMsg.info);
+    int infoSize = strlen(lastMessage);
+    int i;
+    for(i=0; i< 30 - (infoSize+4)/2; i++) printf(" ");
+    printf("~ %s ~\n",lastMessage);//dataMsg.info);
 }
+
+void heartbeatPeriodially(){
+    int error;
+    int serverLates = 0;
+    while(1){
+        sleep(2);
+        Alive aliveMsg;
+        aliveMsg.mtype = TYPE_ALIVE_CLIENT;
+        error = msgsnd(msgId,&aliveMsg,0,IPC_NOWAIT);
+        if(error == -1) perror("Sending aliveMsg");
+        error = msgrcv(msgId,&aliveMsg,0,TYPE_ALIVE_SERVER,IPC_NOWAIT);
+        if(error == -1){
+            if (++serverLates == 3){
+                printf("Server process is dead. Game is over.\n");
+                *stopGame = 1;
+                break;
+            }
+        }
+    }
+}
+
 
 void handleEvents(){
     if (  kbhit() ){
         char ch = getchar();
-            if ((char)ch >= 'a' && (char)ch <= 'z'){
-                if( (char)ch == 'b'){
-                    mode = MODE_BUILD;
-                }
-                else if( (char)ch == 'a'){
-                    mode = MODE_ATTACK;
-                }
-                else if( (char)ch == 'q'){
-                    *stopGame = 1;
-                }
+            if( (char)ch == '1'){
+                mode = MODE_BUILD;
+            }
+            else if( (char)ch == '2'){
+                mode = MODE_ATTACK;
+            }
+            else if( (char)ch == 'q'){
+                *stopGame = 1;
+                //exitSave(0);
             }
     }
 }
@@ -170,42 +201,45 @@ void handleEvents(){
 void prepareAndSendBuildMsg(){
     char type = 0;
     int amount = -1;
-    while(type != 'l' && type !='h' && type !='c' && type !='w'){
-        msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+    while(type != '1' && type !='2' && type !='3' && type !='4' && type != 'q'){
+        msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
         printData(dataMsg);
-        printf("Enter type - (l)ight, (h)eavy, (c)avalry or (w)orkers:\n");
+        printf("\n       Enter type (1) - lightweight warriors,"
+               "\n                  (2) - heavyweight warriors,"
+               "\n                  (3) - cavalry,"
+               "\n                  (4) - workers"
+               "\n"
+               "\n                  (q) - quit\n");
         if( kbhit() ){
             type = getchar();
         }
     }
+    if (type == 'q') return;
 
     while(amount < 0){
-        msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+        msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
         printData(dataMsg);
-        printf("Enter amount (0-9):\n");
+        printf("\n       Enter amount (0-9):\n");
         if( kbhit() ){
             char temp = getchar();
             if (temp>='0' && temp <='9')
                 amount = temp-'0';
-//                        char temp = getchar();
-//                        if(temp == 13 && amount > 0) break;
-//                        if (temp>='1' && temp <='9'){
-//                            amount += (int)temp-'0' * pow(10,count++);
-//                        }
+            else if (temp == 'q')
+                return;
         }
     }
 
     switch(type){
-        case 'l':
+        case '1':
             sendBuildMsg(LIGHT,amount);
             break;
-        case 'h':
+        case '2':
             sendBuildMsg(HEAVY,amount);
             break;
-        case 'c':
+        case '3':
             sendBuildMsg(CAVALRY,amount);
             break;
-        case 'w':
+        case '4':
              sendBuildMsg(WORKER,amount);
             break;
     }
@@ -240,24 +274,10 @@ void sendBuildMsg(int type, int amount){
             buildMsg.workers = amount;
             break;
         default:
-            printf("Wrong entiry type.\n");
+            printf("Wrong entity type.\n");
             return;
     }
-    int error = (int) msgsnd(msgKey, &buildMsg, sizeof(buildMsg)- sizeof(buildMsg.mtype), IPC_NOWAIT);
-    if(error == -1){
-        perror("Sending");
-        exitSave(0);
-    }
-    return;
-}
-
-void sendAttackMsg(int lightAmount, int heavyAmount, int cavalryAmount){
-    Attack attackMsg;
-    attackMsg.mtype = TYPE_ATTACK;
-    attackMsg.light = lightAmount;
-    attackMsg.heavy = heavyAmount;
-    attackMsg.cavalry = cavalryAmount;
-    int error = (int) msgsnd(msgKey, &attackMsg, sizeof(attackMsg)- sizeof(attackMsg.mtype), IPC_NOWAIT);
+    int error = (int) msgsnd(msgId, &buildMsg, sizeof(buildMsg)- sizeof(buildMsg.mtype), IPC_NOWAIT);
     if(error == -1){
         perror("Sending");
         exitSave(0);
@@ -269,34 +289,54 @@ void prepareAndSendAttackMsg(){
     int lightAmount = -1, heavyAmount = -1, cavalryAmount = -1;
 
     while(lightAmount < 0){
-        msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+        msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
         printData(dataMsg);
-        printf("Enter light warriors amount (0-9):\n");
+        printf("\n       Enter lightweight warriors amount (0-9):\n");
         if( kbhit() ){
             char temp = getchar();
             if (temp >='0' && temp <='9')
                 lightAmount = temp-'0';
+            else if (temp == 'q')
+                return;
         }
     }
     while(heavyAmount < 0){
-        msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+        msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
         printData(dataMsg);
-        printf("Enter heavy warriors amount (0-9):\n");
+        printf("\n       Enter heavyweight warriors amount (0-9):\n");
         if( kbhit() ){
             char temp = getchar();
             if (temp >='0' && temp <='9')
                 heavyAmount = temp-'0';
+            else if (temp == 'q')
+                return;
         }
     }
     while(cavalryAmount < 0){
-        msgrcv(msgKey, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
+        msgrcv(msgId, &dataMsg, sizeof(dataMsg)- sizeof(dataMsg.mtype),TYPE_DATA, MSG_NOERROR|IPC_NOWAIT);
         printData(dataMsg);
-        printf("Enter cavalry warriors amount (0-9):\n");
+        printf("\n       Enter cavalry amount (0-9):\n");
         if( kbhit() ){
             char temp = getchar();
             if (temp >='0' && temp <='9')
                 cavalryAmount = temp-'0';
+            else if (temp == 'q')
+                return;
         }
     }
     sendAttackMsg(lightAmount,heavyAmount,cavalryAmount);
+}
+
+void sendAttackMsg(int lightAmount, int heavyAmount, int cavalryAmount){
+    Attack attackMsg;
+    attackMsg.mtype = TYPE_ATTACK;
+    attackMsg.light = lightAmount;
+    attackMsg.heavy = heavyAmount;
+    attackMsg.cavalry = cavalryAmount;
+    int error = (int) msgsnd(msgId, &attackMsg, sizeof(attackMsg)- sizeof(attackMsg.mtype), IPC_NOWAIT);
+    if(error == -1){
+        perror("Sending");
+        exitSave(0);
+    }
+    return;
 }
