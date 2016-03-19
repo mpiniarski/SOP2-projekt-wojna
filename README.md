@@ -1,4 +1,4 @@
-# SOP2-projekt-wojna
+# Wojna procesów
 
 Projekt na zaliczenie przedmiotu Systemy Operacyjne 2.
 Napisany w języku C.
